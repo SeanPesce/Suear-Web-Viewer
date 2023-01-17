@@ -9,7 +9,7 @@
 ## Overview  
 A utility for converting [Suear "smart" earwax cleaner](https://play.google.com/store/apps/details?id=com.i4season.bkCamera) video streams to MJPEG for general-purpose use.  
 
-**NOTE:** This tool has only been tested with the [LEIPUT X6](https://www.amazon.com/Ear-Wax-Removal-Remover-Android%EF%BC%88Black%EF%BC%89/dp/B09KZ8TS7L), but it should work for any product that uses `libWifiCamera.so` and/or the Suear mobile app ([Android](https://play.google.com/store/apps/details?id=com.i4season.bkCamera)/[iOS](https://apps.apple.com/us/app/suear/id1567383367)) for video streaming in its client implementation.  
+**NOTE:** This tool has only been tested with the [LEIPUT X6](https://www.amazon.com/Ear-Wax-Removal-Remover-Android%EF%BC%88Black%EF%BC%89/dp/B09KZ8TS7L), but it should work for any product that uses `libWifiCamera.so` and/or the Suear mobile app (`com.i4season.bkCamera` - [Android](https://play.google.com/store/apps/details?id=com.i4season.bkCamera)/[iOS](https://apps.apple.com/us/app/suear/id1567383367)/[Direct download](https://web.archive.org/web/20230117012623/http://120.79.9.129/ypc/apk/Suear_V1.1.086.apk)) for video streaming in its client implementation.  
 
 
 ## Usage  
