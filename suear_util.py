@@ -24,10 +24,14 @@ def ping(host, timeout=1):
     count_flag = 'c'
     dev_null = '/dev/null'
     quote_char = '\''
+    wait_flag = 'w'
     if 'windows' in platform.system().lower():
         count_flag = 'n'
         dev_null = 'NUL'
         quote_char = '"'
-    cmd = f'ping -{count_flag} 1 -w {int(timeout)} {quote_char}{host}{quote_char} 2>&1 > {dev_null}'
+    if 'darwin' in platform.system().lower():
+        wait_flag = 'W'
+
+    cmd = f'ping -{count_flag} 1 -{wait_flag} {int(timeout)} {quote_char}{host}{quote_char} 2>&1 > {dev_null}'
     retcode = os.system(cmd)
     return retcode == 0
