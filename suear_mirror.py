@@ -415,7 +415,6 @@ class SuearClient:
                     self.frame_queue.put(parse_frame)
                 
                 #print(f'Adding chunk:\n{msg}\n{msg.coordinates=}\n')
-                assert msg.unk1 == 1, f'{msg.unk1=}'
                 parse_frame.add_chunk(msg.n_chunk, data, msg.total_chunks)
                 
                 # If a frame enters the "complete" state, pop frames from the queue (and delete them from
