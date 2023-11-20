@@ -80,7 +80,8 @@ If you find any bugs, please open a new [GitHub issue](https://github.com/SeanPe
 
 
 ## License  
-None yet.
+
+[GNU General Public License v2.0](LICENSE)  
 
 
 ---------------------------------------------
