@@ -1,3 +1,17 @@
+## This fork is just a website overhaul
+
+added many controlls etc to the webpage and made it auto detect if the cam is using port 22785 or 22789 also can have many useres view the webpage at same time.
+
+<img width="997" height="939" alt="image" src="https://github.com/user-attachments/assets/9e0815c1-0029-4908-90cb-9389e2b37552" />
+
+
+
+
+
+
+
+
+
 # MJPEG Mirror for Suear "Smart" Ear Cleaners  
 **Author: Sean Pesce**  
 
