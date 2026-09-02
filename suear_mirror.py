@@ -11,6 +11,7 @@
 import html
 import http.server
 import queue
+import select
 import socket
 import ssl
 import sys
@@ -201,9 +202,10 @@ class HttpHandler(http.server.BaseHTTPRequestHandler):
                 #time.sleep(0.016)  # ~60FPS
             
             suear_client.streaming = False
-            if suear_client.stream_sock is not None and not suear_client.stream_sock._closed:
-                suear_client.stream_sock.close()
-            suear_client.stream_sock = None
+            for sock in suear_client.stream_socks:
+                if not sock._closed:
+                    sock.close()
+            suear_client.stream_socks = []
         return
 
 
@@ -290,10 +292,23 @@ class SuearClient:
     DEFAULT_SERVER = '192.168.1.1'
     COMMAND_PORT = 10005  # UDP
     STREAM_INIT_PORT = 10006  # UDP
-    STREAM_RECV_PORT = 22785  # UDP
+    # Which local port the device pushes video chunks to is apparently
+    # hardcoded per firmware build, not negotiated in the protocol - some
+    # X6-family units use 22785, others 22789 (see issue #9). Rather than
+    # guess, listen on all known ports and use whichever one actually
+    # receives data.
+    STREAM_RECV_PORTS = (22785, 22789)
     FRAME_CHUNK_SZ = 1456
     UDP_READ_SZ = 8192
     FRAME_QUEUE_MAX = 8
+    # If no stream data arrives for this many seconds, get_frame()
+    # automatically disconnects and reconnects instead of hanging forever
+    # (the original blocking recv_into() had no timeout at all, so any
+    # pause in the device's output - a Wi-Fi hiccup, a brief stall - would
+    # block indefinitely with no way to recover short of restarting the
+    # script).
+    STALL_RECONNECT_AFTER_S = 8.0
+    SELECT_TIMEOUT_S = 1.0
     
     def __init__(self, server=DEFAULT_SERVER, cmd_send_index=0):
         self.server = socket.gethostbyname(server)  # Server host name or IP address
@@ -303,7 +318,8 @@ class SuearClient:
         self._device_info = None
         self._connected = False
         self.command_sock = None
-        self.stream_sock = None
+        self.stream_socks = []
+        self._last_recv_at = 0.0
         self.stream_buf = memoryview(bytearray(self.__class__.UDP_READ_SZ))
         self.streaming = False
         self.frame_queue = queue.Queue()
@@ -332,10 +348,10 @@ class SuearClient:
             if not self.command_sock._closed:
                 self.command_sock.close()
             self.command_sock = None
-        if self.stream_sock is not None:
-            if not self.stream_sock._closed:
-                self.stream_sock.close()
-            self.stream_sock = None
+        for sock in self.stream_socks:
+            if not sock._closed:
+                sock.close()
+        self.stream_socks = []
         self._connected = False
     
     
@@ -368,68 +384,80 @@ class SuearClient:
     def get_frame(self):
         if not self.streaming:
             return None
-        
+
         frame = None
 
-        while self.stream_sock is not None and not self.stream_sock._closed:
-            nread = self.stream_sock.recv_into(self.stream_buf)
-            buf = self.stream_buf[:nread]
-            offs = 0
-        
-            # Parse response for multiple messages
-            while True:
-                read_sz = suear_struct.SuearUdpMsg_StreamChunk.sizeof()
-                data = buf[offs:offs+read_sz]
-                offs += read_sz
-                #if len(data) == 0:
-                #    continue
-                
-                if len(data) < read_sz:
-                    if len(data) > 0:
-                        print(f'len(data) < suear_struct.SuearUdpMsg_StreamChunk.sizeof()')
-                        print(data)
-                    return frame
-                
-                msg = suear_struct.SuearUdpMsg_StreamChunk.from_bytes(data)
-                read_sz = self.__class__.FRAME_CHUNK_SZ
-                data = buf[offs:offs+read_sz]
-                offs += len(data)
-                # if len(data) < read_sz:
-                #     print(f'len(data) < read_sz')
-                #     print(data)
-                #     return frame
-                
-                if msg.n_frame in self.frame_dict:
-                    parse_frame = self.frame_dict[msg.n_frame]
-                else:
-                    while len(self.frame_dict) >= len(self.frame_reserve):
-                        # Discard unfinished frames if no free frame slots are available
-                        print('Discarding frame')
-                        self.frame_dict.pop(self.frame_queue.get().index, None)
-                    parse_frame = self.frame_reserve[self.frame_reserve_idx]
-                    self.frame_reserve_idx += 1
-                    if self.frame_reserve_idx >= len(self.frame_reserve):
-                        self.frame_reserve_idx = 0
-                    parse_frame.init(msg.n_frame, msg.res_width, msg.res_height, msg.n_chunk)
-                    self.frame_dict[msg.n_frame] = parse_frame
-                    self.frame_queue.put(parse_frame)
-                
-                #print(f'Adding chunk:\n{msg}\n{msg.coordinates=}\n')
-                parse_frame.add_chunk(msg.n_chunk, data, msg.total_chunks)
-                
-                # If a frame enters the "complete" state, pop frames from the queue (and delete them from
-                # the dict) until the popped frame is the completed frame
-                if parse_frame.complete:
-                    #print(f'Reconstructed frame {parse_frame.index}')
-                    while True:
-                        tmp_frame = self.frame_queue.get()
-                        self.frame_dict.pop(tmp_frame.index, None)
-                        if parse_frame.index == tmp_frame.index:  
-                            break
-                    frame = parse_frame
-                    return frame
-            
-            return frame
+        while self.stream_socks and self.streaming:
+            ready, _, _ = select.select(self.stream_socks, [], [], self.__class__.SELECT_TIMEOUT_S)
+
+            if not ready:
+                # No data on any stream socket within the select window.
+                # Only treat this as a real problem if it's persisted past
+                # the stall threshold - a single empty select() is normal.
+                if time.time() - self._last_recv_at > self.__class__.STALL_RECONNECT_AFTER_S:
+                    print(f'[WARN] No stream data for over {self.__class__.STALL_RECONNECT_AFTER_S}s - reconnecting')
+                    try:
+                        self.disconnect()
+                        self.connect()
+                        self.open_video()
+                    except Exception as e:
+                        print(f'[ERROR] Reconnect attempt failed: {e}')
+                        time.sleep(1)
+                    return None
+                continue
+
+            for sock in ready:
+                nread = sock.recv_into(self.stream_buf)
+                self._last_recv_at = time.time()
+                buf = self.stream_buf[:nread]
+                offs = 0
+
+                # Parse response for multiple messages
+                while True:
+                    read_sz = suear_struct.SuearUdpMsg_StreamChunk.sizeof()
+                    data = buf[offs:offs+read_sz]
+                    offs += read_sz
+
+                    if len(data) < read_sz:
+                        if len(data) > 0:
+                            print(f'len(data) < suear_struct.SuearUdpMsg_StreamChunk.sizeof()')
+                            print(data)
+                        break
+
+                    msg = suear_struct.SuearUdpMsg_StreamChunk.from_bytes(data)
+                    read_sz = self.__class__.FRAME_CHUNK_SZ
+                    data = buf[offs:offs+read_sz]
+                    offs += len(data)
+
+                    if msg.n_frame in self.frame_dict:
+                        parse_frame = self.frame_dict[msg.n_frame]
+                    else:
+                        while len(self.frame_dict) >= len(self.frame_reserve):
+                            # Discard unfinished frames if no free frame slots are available
+                            print('Discarding frame')
+                            self.frame_dict.pop(self.frame_queue.get().index, None)
+                        parse_frame = self.frame_reserve[self.frame_reserve_idx]
+                        self.frame_reserve_idx += 1
+                        if self.frame_reserve_idx >= len(self.frame_reserve):
+                            self.frame_reserve_idx = 0
+                        parse_frame.init(msg.n_frame, msg.res_width, msg.res_height, msg.n_chunk)
+                        self.frame_dict[msg.n_frame] = parse_frame
+                        self.frame_queue.put(parse_frame)
+
+                    parse_frame.add_chunk(msg.n_chunk, data, msg.total_chunks)
+
+                    # If a frame enters the "complete" state, pop frames from the queue (and delete them from
+                    # the dict) until the popped frame is the completed frame
+                    if parse_frame.complete:
+                        while True:
+                            tmp_frame = self.frame_queue.get()
+                            self.frame_dict.pop(tmp_frame.index, None)
+                            if parse_frame.index == tmp_frame.index:
+                                break
+                        frame = parse_frame
+                        return frame
+
+        return frame
     
     
     def mirror_http(self, cert_fpath=None, privkey_fpath=None):
@@ -507,16 +535,20 @@ class SuearClient:
         """
         if self.streaming:
             return
-        
+
         stream_init_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         msg = b'\xee\xff\xee\xff\x00\x00\x04\x00\x01\x00\x00\x00'
         response = self.send_command(msg, port=self.__class__.STREAM_INIT_PORT, sock=stream_init_sock)
         assert response.err_code == 0, f'UDP message error code {response.err_code}'
         stream_init_sock.close()
 
-        self.stream_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.stream_sock.bind(('0.0.0.0', self.__class__.STREAM_RECV_PORT))
+        self.stream_socks = []
+        for port in self.__class__.STREAM_RECV_PORTS:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.bind(('0.0.0.0', port))
+            self.stream_socks.append(sock)
 
+        self._last_recv_at = time.time()
         self.streaming = True
 
         return response
